@@ -120,7 +120,8 @@ jobs:
           set -euo pipefail
           body="$(mktemp)"
           {
-            echo "imp binaries built in GitHub Actions from \`$(git -C . rev-parse HEAD 2>/dev/null || echo ${GITHUB_SHA})\`."
+            # No checkout in this job: GITHUB_SHA is always present, git is not.
+            echo "imp binaries built in GitHub Actions from \`${GITHUB_SHA}\`."
             echo
             echo "Asset contract for an image build:"
             echo
