@@ -1,6 +1,8 @@
 #include "model/ngram_table.h"
 
 #include "core/logging.h"
+#include "core/process_diag.h"
+#include "memory/host_task_pool.h"
 #include "model/json_util.h"
 #include "model/model_limits.h"
 #include "model/safetensors_loader.h"
@@ -11,10 +13,17 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <cerrno>
+#include <cstdlib>
 #include <cmath>
 #include <cstring>
 #include <fstream>
 #include <map>
+#include <thread>
+
+#if defined(IMP_HAVE_LIBURING)
+#include <liburing.h>
+#endif
 
 namespace imp {
 
@@ -208,8 +217,49 @@ void ngram_hash(const NGramHashParams& p, const int32_t* ctx, const int32_t* tok
 }
 
 NGramTable::~NGramTable() {
+    if (log_stats_) {
+        const Stats s = stats();
+        IMP_LOG_INFO("ngram table stats: backend=%s gathers=%llu rows=%llu ranges=%llu bytes=%llu direct=%llu "
+                     "buffered=%llu uring_submits=%llu errors=%llu",
+                     ngram_backend_name(backend_), static_cast<unsigned long long>(s.gathers),
+                     static_cast<unsigned long long>(s.rows), static_cast<unsigned long long>(s.ranges),
+                     static_cast<unsigned long long>(s.bytes_read), static_cast<unsigned long long>(s.direct_reads),
+                     static_cast<unsigned long long>(s.buffered_reads),
+                     static_cast<unsigned long long>(s.uring_submits),
+                     static_cast<unsigned long long>(s.read_errors));
+    }
+    free_staging_();
     if (map_ != nullptr)
         munmap(map_, map_size_);
+    if (fd_ >= 0)
+        ::close(fd_);
+    if (fd_direct_ >= 0)
+        ::close(fd_direct_);
+#if defined(IMP_HAVE_LIBURING)
+    if (ring_live_)
+        io_uring_queue_exit(static_cast<io_uring*>(ring_mem_));
+#endif
+    std::free(ring_mem_);
+}
+
+NGramBackend ngram_backend_from_string(const std::string& name) {
+    if (name == "pread")
+        return NGramBackend::Pread;
+    if (name == "uring")
+        return NGramBackend::Uring;
+    return NGramBackend::Mmap;
+}
+
+const char* ngram_backend_name(NGramBackend b) {
+    switch (b) {
+        case NGramBackend::Pread:
+            return "pread";
+        case NGramBackend::Uring:
+            return "uring";
+        case NGramBackend::Mmap:
+            break;
+    }
+    return "mmap";
 }
 
 std::unique_ptr<NGramTable> NGramTable::open(const std::string& model_dir, int layer, int eos_token_id) {
@@ -293,6 +343,7 @@ std::unique_ptr<NGramTable> NGramTable::open(const std::string& model_dir, int l
     f = file("ngram_embedding.weight_scale");
     if (!f)
         return nullptr;
+    t->shard_path_ = model_dir + "/" + file_of["ngram_embedding.weight_scale"];
     {
         std::vector<int64_t> shape;
         uint64_t off = 0, nbytes = 0;
@@ -312,15 +363,43 @@ std::unique_ptr<NGramTable> NGramTable::open(const std::string& model_dir, int l
         IMP_LOG_ERROR("ngram table: %d shards (limit %d)", n_shards, kMaxTableShards);
         return nullptr;
     }
-    void* base = mmap(nullptr, f->file_size, PROT_READ, MAP_PRIVATE, f->fd, 0);
-    if (base == MAP_FAILED) {
-        IMP_LOG_ERROR("ngram table: mmap of %llu bytes failed",
-                      static_cast<unsigned long long>(f->file_size));
-        return nullptr;
+    // Reader selection comes before the mapping: a streaming backend never maps.
+    t->backend_requested_ = process_diag_ple_table_backend();
+    t->backend_ = ngram_backend_from_string(t->backend_requested_);
+    if (t->backend_ == NGramBackend::Mmap && t->backend_requested_ != "mmap")
+        IMP_LOG_WARN("ngram table: unknown ple.table_backend '%s'; using mmap", t->backend_requested_.c_str());
+    t->log_stats_ = process_diag_ple_log_stats();
+    if (t->backend_ != NGramBackend::Mmap) {
+        const unsigned online = std::thread::hardware_concurrency();
+        t->io_threads_ = process_diag_ple_io_threads();
+        if (t->io_threads_ <= 0)
+            t->io_threads_ = std::min(4u, online ? online : 4u);
+        const int coalesce_kib = process_diag_ple_coalesce_kib();
+        t->coalesce_bytes_ = static_cast<size_t>(coalesce_kib > 0 ? coalesce_kib : 64) * 1024;
+        const int qd = process_diag_ple_queue_depth();
+        t->queue_depth_ = qd > 0 ? qd : 64;
+        t->fd_ = ::open(t->shard_path_.c_str(), O_RDONLY | O_CLOEXEC);
+        if (t->fd_ < 0) {
+            IMP_LOG_ERROR("ngram table: %s: %s", t->shard_path_.c_str(), std::strerror(errno));
+            return nullptr;
+        }
+        t->fd_direct_ = ::open(t->shard_path_.c_str(), O_RDONLY | O_CLOEXEC | O_DIRECT);
+        t->pool_ = std::make_unique<HostTaskPool>(t->io_threads_);
+        t->init_backend_();
     }
-    madvise(base, f->file_size, MADV_RANDOM);
-    t->map_ = base;
-    t->map_size_ = f->file_size;
+
+    void* base = nullptr;
+    if (t->backend_ == NGramBackend::Mmap) {
+        base = mmap(nullptr, f->file_size, PROT_READ, MAP_PRIVATE, f->fd, 0);
+        if (base == MAP_FAILED) {
+            IMP_LOG_ERROR("ngram table: mmap of %llu bytes failed",
+                          static_cast<unsigned long long>(f->file_size));
+            return nullptr;
+        }
+        madvise(base, f->file_size, MADV_RANDOM);
+        t->map_ = base;
+        t->map_size_ = f->file_size;
+    }
     for (int k = 0; k < n_shards; k++) {
         const std::string suffix = "ngram_embedding.shard_" + std::to_string(k) + ".weight";
         StFile* sf = file(suffix);
@@ -345,7 +424,8 @@ std::unique_ptr<NGramTable> NGramTable::open(const std::string& model_dir, int l
                           t->head_dim_);
             return nullptr;
         }
-        t->shards_.push_back({t->total_rows_, shape[0], static_cast<const uint8_t*>(base) + off});
+        t->shards_.push_back({t->total_rows_, shape[0],
+                              t->map_ != nullptr ? static_cast<const uint8_t*>(base) + off : nullptr, off});
         t->total_rows_ += shape[0];
     }
     for (int h = 0; h < t->n_heads_; h++) {
@@ -367,11 +447,23 @@ std::unique_ptr<NGramTable> NGramTable::open(const std::string& model_dir, int l
     }
     IMP_LOG_INFO(
         "ngram table: layer %d, %d shards, %lld rows x %d, %d heads x ngram %d, scale %.5g, eos %d, "
-        "%.1f GiB host-mapped (page cache, not resident)",
+        "%.1f GiB %s",
         layer, n_shards, static_cast<long long>(t->total_rows_), t->head_dim_, t->n_heads_, t->ngram_size_,
         t->scale_, eos_token_id,
-        static_cast<double>(t->total_rows_) * t->head_dim_ / (1024.0 * 1024.0 * 1024.0));
+        static_cast<double>(t->total_rows_) * t->head_dim_ / (1024.0 * 1024.0 * 1024.0),
+        t->backend_ == NGramBackend::Mmap ? "host-mapped (page cache, not resident)"
+                                          : "streamed from the shard file");
+    t->log_backend_();
     return t;
+}
+
+void NGramTable::log_backend_() const {
+    if (!log_stats_)
+        return;
+    const char* direct = fd_direct_ >= 0 ? "O_DIRECT + buffered" : "buffered only";
+    IMP_LOG_INFO("ngram table: backend=%s (requested '%s'), io_threads=%d, coalesce=%zu KiB, ring=%s, %s",
+                 ngram_backend_name(backend_), backend_requested_.c_str(), io_threads_,
+                 coalesce_bytes_ / 1024, ring_live_ ? "live" : "none", direct);
 }
 
 void NGramTable::hash(const int32_t* ctx, const int32_t* tokens, int n, int64_t* ids_out) const {
@@ -381,6 +473,19 @@ void NGramTable::hash(const int32_t* ctx, const int32_t* tokens, int n, int64_t*
 
 void NGramTable::gather(const int64_t* ids, int n, uint16_t* out) const {
     const size_t count = static_cast<size_t>(n) * n_heads_;
+    if (backend_ == NGramBackend::Mmap) {
+        gather_mmap_(ids, count, out);
+        return;
+    }
+    std::lock_guard<std::mutex> lk(io_mu_);
+    if (!gather_streaming_(ids, count, out)) {
+        // A failed read leaves staging undefined; zero rather than feed noise to the gate.
+        IMP_LOG_ERROR("ngram table: gather read failed; zeroing %zu rows", count);
+        std::memset(out, 0, count * static_cast<size_t>(head_dim_) * sizeof(uint16_t));
+    }
+}
+
+void NGramTable::gather_mmap_(const int64_t* ids, size_t count, uint16_t* out) const {
     auto row_ptr = [&](int64_t id) -> const uint8_t* {
         if (id < 0 || id >= total_rows_)
             return nullptr;
@@ -411,6 +516,77 @@ void NGramTable::gather(const int64_t* ids, int n, uint16_t* out) const {
         for (int j = 0; j < head_dim_; j++)
             o[j] = f32_to_f16(fp8_e4m3_to_f32(p[j]) * scale_);
     }
+}
+
+// One row per (token, head), deduplicated and sorted by file offset so coalescing
+// sees neighbours, read once, then converted per slot.
+bool NGramTable::gather_streaming_(const int64_t* ids, size_t count, uint16_t* out) const {
+    constexpr uint32_t kNoPlan = 0xffffffffu;
+    const size_t row_bytes = static_cast<size_t>(head_dim_);
+    auto shard_of = [&](int64_t id) -> const Shard* {
+        if (id < 0 || id >= total_rows_)
+            return nullptr;
+        auto it = std::upper_bound(shards_.begin(), shards_.end(), id,
+                                   [](int64_t v, const Shard& s) { return v < s.row_start; });
+        return &*(--it);
+    };
+
+    plan_ix_.assign(count, kNoPlan);
+    plan_.clear();
+    size_t invalid = 0;
+    for (size_t i = 0; i < count; i++) {
+        const Shard* sh = shard_of(ids[i]);
+        if (sh == nullptr) {
+            invalid++;
+            continue;
+        }
+        plan_.push_back({sh->byte_off + static_cast<uint64_t>(ids[i] - sh->row_start) * row_bytes, ids[i]});
+    }
+    if (invalid != 0 && n_out_of_range_++ == 0)
+        IMP_LOG_ERROR("ngram table: %zu ids outside [0, %lld) in one gather, rows zeroed", invalid,
+                      static_cast<long long>(total_rows_));
+
+    std::sort(plan_.begin(), plan_.end(), [](const RowRef& a, const RowRef& b) { return a.off < b.off; });
+    plan_.erase(std::unique(plan_.begin(), plan_.end(),
+                            [](const RowRef& a, const RowRef& b) { return a.off == b.off; }),
+                plan_.end());
+    // Slots are not sorted, so each one binary-searches the plan.
+    for (size_t i = 0; i < count; i++) {
+        const Shard* sh = shard_of(ids[i]);
+        if (sh == nullptr)
+            continue;
+        const uint64_t off = sh->byte_off + static_cast<uint64_t>(ids[i] - sh->row_start) * row_bytes;
+        const auto it = std::lower_bound(plan_.begin(), plan_.end(), off,
+                                         [](const RowRef& r, uint64_t v) { return r.off < v; });
+        if (it == plan_.end() || it->off != off)
+            return false;  // planning bug: the row was just inserted above
+        plan_ix_[i] = static_cast<uint32_t>(it - plan_.begin());
+    }
+
+    if (!stream_())
+        return false;
+
+    for (size_t i = 0; i < count; i++) {
+        uint16_t* o = out + i * head_dim_;
+        if (plan_ix_[i] == kNoPlan) {
+            std::memset(o, 0, row_bytes * 2);
+            continue;
+        }
+        const uint8_t* p = row_ptr_[plan_ix_[i]];
+        for (int j = 0; j < head_dim_; j++)
+            o[j] = f32_to_f16(fp8_e4m3_to_f32(p[j]) * scale_);
+    }
+    {
+        std::lock_guard<std::mutex> lk(stats_mu_);
+        ++stats_.gathers;
+        stats_.rows += plan_.size();
+    }
+    return true;
+}
+
+NGramTable::Stats NGramTable::stats() const {
+    std::lock_guard<std::mutex> lk(stats_mu_);
+    return stats_;
 }
 
 }  // namespace imp

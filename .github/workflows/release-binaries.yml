@@ -1,0 +1,136 @@
+# Binary release lane (fork-local).
+#
+# The build lane (`PLE CI`) uploads an artifact per commit. This one publishes a
+# tarball to a GitHub release, which is what `tayuLuc/llama-swap-cuda-images`
+# consumes: its fetch-binaries.sh pulls a named asset from a release and drops it
+# under /opt/llama/<name>/.
+#
+# Tags are `imp-tayu-<version>` rather than the upstream `v*` pattern, so this
+# does not fire alongside the inherited release-docker.yml.
+#
+# Same container and configure flags as PLE CI: nvcc 13.4, sm_120a SASS only.
+
+name: Release binaries
+
+on:
+  push:
+    tags: ['imp-tayu-*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'tag to create or update, e.g. imp-tayu-0.50.0'
+        required: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+
+    container:
+      image: nvidia/cuda:13.4.2-devel-ubuntu26.04@sha256:14fd494fd8496817a70700e4d2c52bd42de56c5d39c041bf8342814614d5fe56
+
+    env:
+      CUDA_VERSION: "13.4"
+      DEBIAN_FRONTEND: noninteractive
+      CCACHE_DIR: /github/home/.ccache
+      CCACHE_MAXSIZE: 8G
+      CCACHE_COMPRESS: "1"
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install build dependencies
+        run: |
+          apt-get update -qq
+          apt-get install -y --no-install-recommends \
+            git ninja-build python3 wget ca-certificates ccache tar \
+            libcurl4-openssl-dev libjpeg-turbo8-dev liburing-dev
+          wget -qO /tmp/cmake.sh https://github.com/Kitware/CMake/releases/download/v4.3.5/cmake-4.3.5-linux-x86_64.sh
+          echo 'b48d919cf4dec27e594f9e0c227e48274e20238bcda8b4b471a94f9099cccd83  /tmp/cmake.sh' | sha256sum -c -
+          sh /tmp/cmake.sh --skip-license --prefix=/usr/local
+          cmake --version
+
+      - name: Configure
+        run: |
+          cmake -B build \
+            -GNinja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DIMP_BUILD_TESTS=OFF \
+            -DIMP_BUILD_TOOLS=ON \
+            -DIMP_BUILD_BENCH=OFF \
+            -DIMP_DISABLE_120F_FALLBACK=ON \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            "-DCMAKE_CUDA_COMPILER_LAUNCHER=sh;$PWD/scripts/ci_compile_slot.sh;ccache"
+
+      - name: Build
+        run: cmake --build build -j"$(sh scripts/build_jobs.sh)"
+
+      - name: Package
+        id: meta
+        run: |
+          version="$(grep -oP 'project\(imp\s+VERSION\s+\K[0-9.]+' CMakeLists.txt | head -1)"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          staging=/tmp/dist/imp
+          mkdir -p "$staging"
+          for b in imp-cli imp-server; do
+            [ -x "build/$b" ] || { echo "!! $b not built"; exit 1; }
+            cp "build/$b" "$staging/"
+          done
+          {
+            echo "imp $version"
+            echo "commit $(git rev-parse HEAD)"
+            echo "cuda $CUDA_VERSION (runtime soname libcudart.so.13)"
+            echo "arch sm_120a only (no 120f PTX fallback)"
+            echo "built $(date -u +%FT%TZ)"
+          } > "$staging/VERSION.txt"
+          cat "$staging/VERSION.txt"
+          tar -czf /tmp/imp-binaries-linux-amd64-${version}.tar.gz -C /tmp/dist imp
+          ldd "$staging/imp-cli" | grep -i "cuda\|not found" || true
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: imp-release-tarball
+          path: /tmp/imp-binaries-linux-amd64-*.tar.gz
+          retention-days: 30
+
+      - name: Keep the tarball for the publish job
+        run: mkdir -p /github/workspace-out && cp /tmp/imp-binaries-linux-amd64-*.tar.gz /github/workspace-out/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+        with:
+          name: imp-release-tarball
+          path: out
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          body="$(mktemp)"
+          {
+            echo "imp binaries built in GitHub Actions from \`$(git -C . rev-parse HEAD 2>/dev/null || echo ${GITHUB_SHA})\`."
+            echo
+            echo "Asset contract for an image build:"
+            echo
+            echo '```'
+            echo "curl -sL https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/<asset> | tar -xz -C /opt/llama/"
+            echo '```'
+          } > "$body"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" out/*.tar.gz --clobber
+          else
+            gh release create "$TAG" out/*.tar.gz --title "$TAG" --notes-file "$body"
+          fi
+          gh release view "$TAG" --json url -q .url

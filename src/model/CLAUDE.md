@@ -1,7 +1,7 @@
 <!--
 layer: L3
 audience: agents
-verified: 2026-10-02
+verified: 2026-10-09
 commit: f91345c1
 -->
 
@@ -26,6 +26,10 @@ GGUF and SafeTensors loading, the architecture registry, tensor-name mapping, up
 - `hf_config_loader.cpp`: `config.json` arch detection + `load_config`; arch-independent keys in `hf_config_generic.cpp`, per-arch keys in `hf_config/<arch>.cpp`, one `kHfConfigHooks` row each in `arch_registry.cpp` (#2537)
 - `weight_map.cpp`, `tensor_kind_matcher.cpp`: tensor name -> role
 - `weight_upload.cpp`: device placement, expert offload decisions
+- `ngram_table.cpp` / `ngram_table_io.cpp`: Qwen4Exp PLE n-gram table. `mmap` maps the shard file and
+  leaves residency to the page cache; `pread`/`uring` (`ple.table_backend`, set at load through
+  process_diag) read the selected rows into host staging. The open accessors, the `mmap` gather and the
+  backend switch live in the first, the streaming readers in the second.
 - `expert_placement.h`: the pure predicate for a servable MoE placement
 
 ## Test

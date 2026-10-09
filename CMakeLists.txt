@@ -200,6 +200,7 @@ set(IMP_MODEL_SOURCES
     src/model/model.cpp
     src/model/model_profile.cpp
     src/model/ngram_table.cpp
+    src/model/ngram_table_io.cpp
     src/model/gguf_loader.cpp
     src/model/gguf_parse.cpp
     src/model/gguf_tensor_assign.cpp
@@ -609,6 +610,22 @@ if(IMP_USE_CUTLASS)
     target_compile_definitions(imp PRIVATE IMP_USE_CUTLASS=1)
 endif()
 
+# io_uring for the PLE n-gram table reader (ple.table_backend=uring). Optional:
+# without liburing that backend logs and serves as pread, so a build with no
+# -dev package still produces a working binary. Not a FetchContent pin: it is a
+# distro library like libcurl, installed by the Dockerfile.
+option(IMP_WITH_LIBURING "Use liburing for the PLE table uring backend" ON)
+if(IMP_WITH_LIBURING)
+    find_library(IMP_LIBURING_LIBRARY NAMES uring)
+    if(IMP_LIBURING_LIBRARY)
+        target_compile_definitions(imp PRIVATE IMP_HAVE_LIBURING=1)
+        target_link_libraries(imp PRIVATE ${IMP_LIBURING_LIBRARY})
+        message(STATUS "liburing: ${IMP_LIBURING_LIBRARY} (PLE table backend 'uring' available)")
+    else()
+        message(STATUS "liburing: not found (PLE table backend 'uring' serves as pread)")
+    endif()
+endif()
+
 set_target_properties(imp PROPERTIES
     CUDA_RESOLVE_DEVICE_SYMBOLS ON
     POSITION_INDEPENDENT_CODE ON
@@ -910,6 +927,7 @@ if(IMP_BUILD_TESTS)
         # Every ModelArch -> arch-keyed ModelProfile fields + SWA windows (#2456).
         tests/test_model_profile_table.cpp
         tests/test_ngram_table.cpp
+        tests/test_ngram_table_backends.cpp
         tests/test_safetensors_loader.cpp
         tests/test_dequant_awq.cpp
         tests/test_dequant_gptq.cpp

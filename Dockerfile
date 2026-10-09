@@ -33,6 +33,7 @@ RUN { sed -i 's|archive.ubuntu.com|de.archive.ubuntu.com|g; s|security.ubuntu.co
     && apt-get update \
     && apt-get install -y --no-install-recommends \
         g++ git ninja-build ca-certificates python3 wget ccache libcurl4-openssl-dev libjpeg-turbo8-dev \
+        liburing-dev \
     && wget -qO /tmp/cmake.sh https://github.com/Kitware/CMake/releases/download/v4.3.5/cmake-4.3.5-linux-x86_64.sh \
     && echo 'b48d919cf4dec27e594f9e0c227e48274e20238bcda8b4b471a94f9099cccd83  /tmp/cmake.sh' | sha256sum -c - \
     && sh /tmp/cmake.sh --skip-license --prefix=/usr/local \

@@ -80,6 +80,11 @@ void process_diag_install(const RuntimeConfig& cfg) {
     d.moe_pin_host_experts = cfg.moe.pin_host_experts;
     d.moe_host_expert_pool_mib = cfg.moe.host_expert_pool_mib;
     d.gdn_layout_override = cfg.gdn.layout_override;
+    d.ple_table_backend = cfg.ple.table_backend;
+    d.ple_io_threads = cfg.ple.io_threads;
+    d.ple_coalesce_kib = cfg.ple.coalesce_kib;
+    d.ple_queue_depth = cfg.ple.queue_depth;
+    d.ple_log_stats = cfg.ple.log_stats;
     process_diag_set(d);
 }
 
