@@ -248,9 +248,13 @@ void ple_gather(const int64_t* d_ids, uint32_t count, const uint8_t* map_base,
     if (count == 0)
         return;
     // A warp per row; one warp suffices for head_dim <= 32*k and is all these rows ever need.
-    ple_gather_kernel<<<count, 32, 0, stream>>>(d_ids, count, map_base, d_shard_row_starts,
-                                               d_shard_byte_offs, n_shards, total_rows, head_dim, scale,
-                                               d_out);
+    // The grid is a whole number of buckets, not count, so the launch geometry stays constant
+    // across steps and a captured graph does not have to be re-taken when the batch moves. The
+    // kernel already returns on `row >= count`, which is what absorbs the padding.
+    ple_gather_kernel<<<ple_gather_blocks(count), 32, 0, stream>>>(d_ids, count, map_base,
+                                                                    d_shard_row_starts,
+                                                                    d_shard_byte_offs, n_shards, total_rows,
+                                                                    head_dim, scale, d_out);
     IMP_CUDA_CHECK_LAUNCH();
 }
 
