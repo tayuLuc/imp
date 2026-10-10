@@ -25,4 +25,15 @@ void ple_conv_add(const Tensor& gv, const Tensor& gvn, const Tensor& w, void* co
                   cudaStream_t stream, void* snap_state = nullptr, const int* d_snap_n = nullptr,
                   const int* d_real_n = nullptr);
 
+// Device-side n-gram gather. Reads the mapped shard file directly, so it can be captured in
+// a CUDA graph where a host gather cannot. Every pointer is a device pointer except
+// map_base, which is a host mmap the GPU dereferences through HMM. Byte-identical to
+// NGramTable::gather, which stays the reference implementation.
+//
+// count rows of head_dim halves into d_out, one id per row. Shard geometry comes from the
+// flat arrays NGramTable publishes. The caller must have confirmed the table is mapped.
+void ple_gather(const int64_t* d_ids, uint32_t count, const uint8_t* map_base,
+                const int64_t* d_shard_row_starts, const uint64_t* d_shard_byte_offs, int n_shards,
+                int64_t total_rows, int head_dim, float scale, uint16_t* d_out, cudaStream_t stream);
+
 }  // namespace imp
