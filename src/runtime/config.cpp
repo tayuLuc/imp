@@ -288,6 +288,13 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     I("moe.nvfp4_smallM_threshold", cfg.moe.nvfp4_smallM_threshold);
     I("moe.mr_nr", cfg.moe.mr_nr);
 
+    // [ple] Qwen4Exp n-gram table reader, applied at model load.
+    S("ple.table_backend", cfg.ple.table_backend);
+    I("ple.io_threads", cfg.ple.io_threads);
+    I("ple.coalesce_kib", cfg.ple.coalesce_kib);
+    I("ple.queue_depth", cfg.ple.queue_depth);
+    B("ple.log_stats", cfg.ple.log_stats);
+
     // [gdn]
     B("gdn.fp32_scan", cfg.gdn.fp32_scan);
     B("gdn.fp32_out", cfg.gdn.fp32_out);

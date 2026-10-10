@@ -94,5 +94,10 @@ int process_diag_moe_force_host_experts() { return slot().moe_force_host_experts
 bool process_diag_moe_pin_host_experts() { return slot().moe_pin_host_experts; }
 int process_diag_moe_host_expert_pool_mib() { return slot().moe_host_expert_pool_mib; }
 const std::string& process_diag_gdn_layout_override() { return slot().gdn_layout_override; }
+const std::string& process_diag_ple_table_backend() { return slot().ple_table_backend; }
+int process_diag_ple_io_threads() { return slot().ple_io_threads; }
+int process_diag_ple_coalesce_kib() { return slot().ple_coalesce_kib; }
+int process_diag_ple_queue_depth() { return slot().ple_queue_depth; }
+bool process_diag_ple_log_stats() { return slot().ple_log_stats; }
 
 }  // namespace imp

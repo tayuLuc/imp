@@ -1,8 +1,8 @@
 #pragma once
 
-// One of nine RuntimeConfig sections split from core/dispatch_policy.h:
+// One of ten RuntimeConfig sections split from core/dispatch_policy.h:
 // isolates a TU that touches only this section from the other eight's churn.
-// Pure move, byte-identical; dispatch_policy.h still includes all nine.
+// Pure move, byte-identical; dispatch_policy.h still includes all ten.
 
 #include <cstdint>
 #include <string>
@@ -48,8 +48,7 @@ struct Attention {
     int fa2_hd256_bkv = 64;
     // Dense (hd=128, Bq=128) FA2 at 2 CTAs/SM: TWOSLOT tile 35 KB, plus
     // __launch_bounds__(256, 2) pins 128 registers (137 unconstrained, 40 B
-    // local frame per the ptxas baseline). hd=64 Bq=128: double buffer, 163 -> 128
-    // registers, 8 B stack. Default on.
+    // local frame per the ptxas baseline). Default on.
     bool fa2_dense_2cta = true;
     // RA2 prefill (compute/ra2/): INT8 QK^T, NVFP4 P x two-term NVFP4 V, quantized per call; hd 64/128/256,
     // causal, no window/softcap/sinks, declines under runtime.deterministic. Lossy, so opt-in.

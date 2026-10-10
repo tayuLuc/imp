@@ -1,0 +1,121 @@
+# Fork-local build lane.
+#
+# Upstream ci.yml arrives in a fork as `disabled_fork` and cannot be enabled
+# through the API, so this is the fork's own equivalent of the `Build` job:
+# configure, build, run every CPU-runnable test. No GPU job: runtime tests need
+# a self-hosted GPU runner, which the fork does not have.
+#
+# Same container as upstream Build (nvcc on PATH, Ubuntu 26.04 -> GCC 15.2, same
+# libstdc++ as the release image), same configure flags including the sm_120a-only
+# gencode that halves device compile time.
+
+name: PLE CI
+
+on:
+  push:
+    branches: [ple-streaming-table]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    container:
+      image: nvidia/cuda:13.4.2-devel-ubuntu26.04@sha256:14fd494fd8496817a70700e4d2c52bd42de56c5d39c041bf8342814614d5fe56
+
+    env:
+      CUDA_VERSION: "13.4"
+      DEBIAN_FRONTEND: noninteractive
+      CCACHE_DIR: /github/home/.ccache
+      CCACHE_MAXSIZE: 8G
+      CCACHE_COMPRESS: "1"
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # The container ships neither git nor python3 nor cmake; actions/checkout
+      # needs git, the build needs cmake + the host-side deps the loader links.
+      - name: Install build dependencies
+        run: |
+          apt-get update -qq
+          apt-get install -y --no-install-recommends \
+            git ninja-build python3 wget ca-certificates ccache \
+            libcurl4-openssl-dev libjpeg-turbo8-dev liburing-dev
+          wget -qO /tmp/cmake.sh https://github.com/Kitware/CMake/releases/download/v4.3.5/cmake-4.3.5-linux-x86_64.sh
+          echo 'b48d919cf4dec27e594f9e0c227e48274e20238bcda8b4b471a94f9099cccd83  /tmp/cmake.sh' | sha256sum -c -
+          sh /tmp/cmake.sh --skip-license --prefix=/usr/local
+          cmake --version
+
+      # ci_compile_slot.sh serialises the five CUTLASS TUs (4.97-8.56 GB each)
+      # behind flock; build_jobs.sh caps -j by RAM. Without both, -j$(nproc) on a
+      # 7 GB runner is an OOM kill at roughly 200/810 objects, with no compiler
+      # diagnostic in the log.
+      - name: Restore ccache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /github/home/.ccache
+          key: ${{ runner.os }}-cuda${{ env.CUDA_VERSION }}-ccache-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-cuda${{ env.CUDA_VERSION }}-ccache-
+
+      - name: Configure
+        run: |
+          cmake -B build \
+            -GNinja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DIMP_BUILD_TESTS=ON \
+            -DIMP_BUILD_TOOLS=ON \
+            -DIMP_BUILD_BENCH=OFF \
+            -DIMP_DISABLE_120F_FALLBACK=ON \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            "-DCMAKE_CUDA_COMPILER_LAUNCHER=sh;$PWD/scripts/ci_compile_slot.sh;ccache"
+
+      - name: Build
+        run: cmake --build build -j"$(sh scripts/build_jobs.sh)"
+
+      - name: Run CPU unit tests
+        run: cd build && ctest -L unit -j4 --output-on-failure --timeout 120
+
+      - name: PLE table backend tests
+        run: cd build && ctest -R ngram_table --output-on-failure --timeout 300
+
+      # The binary this lane produces is the artifact a GPU box runs: no build
+      # machine at hand is guaranteed to be free, so the release path starts here.
+      # sm_120a SASS only (IMP_DISABLE_120F_FALLBACK=ON), same as the release
+      # image but without its 120f PTX fallback for 5080/5070 parts.
+      - name: Collect binaries
+        run: |
+          mkdir -p dist
+          for b in imp-cli imp-server; do
+            [ -x "build/$b" ] && cp "build/$b" "dist/$b"
+          done
+          # The device-gather byte comparison. Built here, executed on the 5090 node: this lane has
+          # no GPU runner, so the only honest place to RUN it is hardware. Shipping it in the same
+          # artifact means the node never has to compile anything.
+          if [ -x "build/test-ple-device-gather" ]; then
+            cp "build/test-ple-device-gather" "dist/test-ple-device-gather"
+            echo "included test-ple-device-gather"
+          else
+            echo "::warning::test-ple-device-gather was not built; the node byte check cannot run"
+          fi
+          ls -l dist
+          ldd dist/imp-cli 2>/dev/null | grep -i cuda || true
+
+      - name: Save ccache
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /github/home/.ccache
+          key: ${{ runner.os }}-cuda${{ env.CUDA_VERSION }}-ccache-${{ github.sha }}
+
+      - name: Upload binaries
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: imp-binaries-${{ github.sha }}
+          path: dist/
+          retention-days: 14

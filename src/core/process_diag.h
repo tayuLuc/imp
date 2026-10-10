@@ -83,6 +83,15 @@ struct ProcessDiag {
 
     // GDN
     std::string gdn_layout_override;
+
+    // PLE n-gram table reader (Qwen4Exp). Read at model-load time by
+    // NGramTable::open, which has no RuntimeConfig in scope, the same way the
+    // MoE placement knobs are read from the loader.
+    std::string ple_table_backend = "mmap";
+    int ple_io_threads = 0;
+    int ple_coalesce_kib = 0;
+    int ple_queue_depth = 0;
+    bool ple_log_stats = true;
 };
 
 const ProcessDiag& process_diag_current();
@@ -208,5 +217,13 @@ int process_diag_moe_force_host_experts();
 // GDN: layout override read at model-load time by hf_config_loader (no
 // per-Engine context at that point in the loader pipeline).
 const std::string& process_diag_gdn_layout_override();
+
+// PLE n-gram table reader, read at model-load time by NGramTable::open.
+// Defaults are the values in the struct, so a caller before install gets mmap.
+const std::string& process_diag_ple_table_backend();
+[[nodiscard]] int process_diag_ple_io_threads();
+[[nodiscard]] int process_diag_ple_coalesce_kib();
+[[nodiscard]] int process_diag_ple_queue_depth();
+[[nodiscard]] bool process_diag_ple_log_stats();
 
 }  // namespace imp
