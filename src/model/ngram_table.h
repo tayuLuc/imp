@@ -54,7 +54,11 @@ void ngram_hash(const NGramHashParams& p, const int32_t* ctx, const int32_t* tok
     return ok;
 }
 
-enum class NGramBackend { Mmap, Pread, Uring };
+// MmapDevice is Mmap plus a device-side gather: the table is mapped as usual and the executor runs
+// ple_gather against the mapping, so only the row ids cross PCIe instead of the gathered rows.
+// Opt-in through ple.table_backend=mmap_device; the default stays Mmap, so nothing changes for a
+// caller who has not asked for it.
+enum class NGramBackend { Mmap, Pread, Uring, MmapDevice };
 
 // Parses ple.table_backend. Unknown spellings fall back to "mmap" (logged) so a
 // typo never turns into a refusal at load.

@@ -179,6 +179,35 @@ void GraphExecutor::ple_prepare_host_(const int32_t* ids, int n, int n_seq, cons
     for (int s = 0; s < n_seq; s++)
         tab->hash(ctx + static_cast<size_t>(s) * ctx_len, ids + static_cast<size_t>(s) * rows, rows,
                   ple_ids_.data() + static_cast<size_t>(s) * rows * tab->n_heads());
+
+    if (tab->backend() == NGramBackend::MmapDevice) {
+        // Only the ids cross PCIe here, n * n_heads * 8 bytes, where the host path moves the gathered
+        // rows, n * d_model * 2. The kernel counts ROWS, so n * n_heads is passed, not n.
+        const size_t dev_rows = static_cast<size_t>(n) * static_cast<size_t>(tab->n_heads());
+        if (ple_d_shard_start_ == nullptr) {
+            const size_t shards = tab->shard_count();
+            IMP_CUDA_CHECK_LOG(cudaMalloc(&ple_d_shard_start_, shards * sizeof(int64_t)));
+            IMP_CUDA_CHECK_LOG(cudaMalloc(&ple_d_shard_off_, shards * sizeof(uint64_t)));
+            IMP_CUDA_CHECK_LOG(cudaMemcpy(ple_d_shard_start_, tab->shard_row_starts(),
+                                          shards * sizeof(int64_t), cudaMemcpyHostToDevice));
+            IMP_CUDA_CHECK_LOG(cudaMemcpy(ple_d_shard_off_, tab->shard_byte_offs(),
+                                          shards * sizeof(uint64_t), cudaMemcpyHostToDevice));
+        }
+        if (dev_rows > ple_d_ids_cap_) {
+            if (ple_d_ids_ != nullptr)
+                cudaFree(ple_d_ids_);
+            IMP_CUDA_CHECK_LOG(cudaMalloc(&ple_d_ids_, dev_rows * sizeof(int64_t)));
+            ple_d_ids_cap_ = dev_rows;
+        }
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(ple_d_ids_, ple_ids_.data(), dev_rows * sizeof(int64_t),
+                                           cudaMemcpyHostToDevice, stream));
+        ple_gather(ple_d_ids_, static_cast<uint32_t>(dev_rows), tab->map_base(), ple_d_shard_start_,
+                   ple_d_shard_off_, static_cast<int>(tab->shard_count()), tab->total_rows(),
+                   tab->head_dim(), tab->scale(),
+                   static_cast<uint16_t*>(ple_emb_dev_.data), stream);
+        return;
+    }
+
     // The previous chunk's H2D must have drained before the staging rows are rewritten.
     IMP_CUDA_CHECK_LOG(cudaEventSynchronize(ple_h2d_done_));
     tab->gather(ple_ids_.data(), n, ple_host_.as<uint16_t>());
