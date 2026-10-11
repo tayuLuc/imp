@@ -4,6 +4,13 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+### Added
+- `ple.table_backend` (`mmap` default, `pread`, `uring`): Qwen4Exp PLE n-gram rows. The FP8 table
+  is never fully resident; `pread` reads the selected rows into an aligned staging buffer
+  (O_DIRECT widened to the alignment, on `ple.io_threads` workers) and `uring` the same as a
+  bounded io_uring batch, so resident set is the staging buffer instead of the table. All
+  backends return identical rows; `uring` serves as `pread` when the build has no io_uring.
+
 ## [0.51.0] - 2026-10-11
 
 ### Added
