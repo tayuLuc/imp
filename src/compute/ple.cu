@@ -163,4 +163,95 @@ void ple_conv_add(const Tensor& gv, const Tensor& gvn, const Tensor& w, void* co
     IMP_CUDA_CHECK_LAUNCH();
 }
 
+
+// ---- device-side n-gram gather (Qwen4Exp PLE) ---------------------------------
+//
+// One block per row, and the stride is blockDim.x rather than a hardcoded 32 so the kernel
+// stays correct if the launch config ever changes; a fixed 32 would silently duplicate work
+// the moment a second warp joined the block. A row is head_dim contiguous bytes in the shard
+// file, so the block walks it in parallel instead of one thread serially walking 160 bytes.
+//
+// The table is read where it already lives: map_base is the host mmap of the SafeTensors
+// file and the kernel dereferences it directly. On a discrete card that is HMM with
+// software page faults, not ATS - deliberately the slow path. The point is that the gather
+// runs on the device and can therefore sit inside a CUDA graph; a cold row costs a fault
+// either way, but on the host it also costs a synchronous read on the critical path.
+//
+// ngram_table.cpp's host readers are the reference: this must return byte-identical rows.
+// The FP8 decode computes the same two products the host does, and the FP16 store rounds to
+// nearest even like the host f32_to_f16. That equality was checked over all 256 byte values;
+// an earlier version that rebuilt the mantissa from exponent bits was wrong for subnormals
+// and lost the sign of zero, so the value is computed rather than reassembled.
+
+__device__ __forceinline__ float ple_fp8_to_f32(uint8_t b) {
+    const int sign = (b >> 7) & 1;
+    const int exp = (b >> 3) & 0xf;
+    const int mant = b & 7;
+    if (exp == 15 && mant == 7)
+        return __int_as_float(0x7fc00000);  // NaN, matching std::nanf("")
+    // Same two products the host computes, so the mantissa is bit-identical rather than
+    // reconstructed from exponent bits - the reconstruction was wrong for subnormals and
+    // dropped the sign of zero. Verified over all 256 byte values against the host.
+    const float v = (exp == 0) ? ldexpf(static_cast<float>(mant) / 8.0f, -6)
+                               : ldexpf(1.0f + static_cast<float>(mant) / 8.0f, exp - 7);
+    // Stamp the sign on the bit pattern so -0.0 survives; negating the float would not.
+    const unsigned int bits = __float_as_uint(v) & 0x7fffffffu;
+    return __uint_as_float((sign ? 0x80000000u : 0u) | bits);
+}
+
+// Shard s holds rows [row_starts[s], row_starts[s+1]); the last runs to total_rows.
+// Ascending row_starts, so this is the same search the host does, ~log2(n_shards) steps.
+__device__ __forceinline__ int ple_shard_of(int64_t id, const int64_t* row_starts, int n_shards) {
+    int lo = 0, hi = n_shards - 1;
+    while (lo < hi) {
+        const int mid = (lo + hi + 1) >> 1;
+        if (row_starts[mid] <= id)
+            lo = mid;
+        else
+            hi = mid - 1;
+    }
+    return lo;
+}
+
+// count rows of head_dim halves. ids is device, out is device; both come from the host
+// gather's contract. map_base is a host address the device dereferences through HMM.
+__global__ void ple_gather_kernel(const int64_t* __restrict__ ids, uint32_t count,
+                                  const uint8_t* __restrict__ map_base,
+                                  const int64_t* __restrict__ shard_row_starts,
+                                  const uint64_t* __restrict__ shard_byte_offs, int n_shards,
+                                  int64_t total_rows, int head_dim, float scale,
+                                  uint16_t* __restrict__ out) {
+    const unsigned int row = blockIdx.x;
+    if (row >= count)
+        return;
+    const int64_t id = ids[row];
+    uint16_t* o = out + static_cast<size_t>(row) * head_dim;
+
+    // Out-of-range ids zero the row, exactly as the host does.
+    if (id < 0 || id >= total_rows) {
+        for (int j = threadIdx.x; j < head_dim; j += blockDim.x)
+            o[j] = 0;
+        return;
+    }
+    const int s = ple_shard_of(id, shard_row_starts, n_shards);
+    const uint8_t* src = map_base + shard_byte_offs[s] +
+                         static_cast<uint64_t>(id - shard_row_starts[s]) * head_dim;
+    for (int j = threadIdx.x; j < head_dim; j += blockDim.x)
+        o[j] = __half_as_ushort(__float2half_rn(ple_fp8_to_f32(src[j]) * scale));
+}
+
+// ids stays host-resident on purpose: the hash that produces it is host work too, and this
+// PR moves the gather, not the hash. out must not alias anything the caller still reads.
+void ple_gather(const int64_t* d_ids, uint32_t count, const uint8_t* map_base,
+                const int64_t* d_shard_row_starts, const uint64_t* d_shard_byte_offs, int n_shards,
+                int64_t total_rows, int head_dim, float scale, uint16_t* d_out, cudaStream_t stream) {
+    if (count == 0)
+        return;
+    // A warp per row; one warp suffices for head_dim <= 32*k and is all these rows ever need.
+    ple_gather_kernel<<<count, 32, 0, stream>>>(d_ids, count, map_base, d_shard_row_starts,
+                                               d_shard_byte_offs, n_shards, total_rows, head_dim, scale,
+                                               d_out);
+    IMP_CUDA_CHECK_LAUNCH();
+}
+
 }  // namespace imp
