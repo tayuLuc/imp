@@ -247,6 +247,8 @@ NGramBackend ngram_backend_from_string(const std::string& name) {
         return NGramBackend::Pread;
     if (name == "uring")
         return NGramBackend::Uring;
+    if (name == "mmap_device")
+        return NGramBackend::MmapDevice;
     return NGramBackend::Mmap;
 }
 
@@ -256,6 +258,8 @@ const char* ngram_backend_name(NGramBackend b) {
             return "pread";
         case NGramBackend::Uring:
             return "uring";
+        case NGramBackend::MmapDevice:
+            return "mmap_device";
         case NGramBackend::Mmap:
             break;
     }
