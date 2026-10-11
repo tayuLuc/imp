@@ -712,6 +712,13 @@ private:
     std::vector<int64_t> ple_ids_;
     std::vector<int32_t> ple_step_ctx_;
     CudaEvent ple_h2d_done_;
+    // ple.table_backend=mmap_device only (executor_ple.cpp): the shard geometry lives in the table,
+    // which is a host-side layer that cannot call the kernel, so the upload happens here where CUDA
+    // already is. Kept across steps because the shards do not change between them.
+    int64_t* ple_d_shard_start_ = nullptr;
+    uint64_t* ple_d_shard_off_ = nullptr;
+    int64_t* ple_d_ids_ = nullptr;
+    size_t ple_d_ids_cap_ = 0;
     // Qwen4Exp QSA indexer (executor_qsa.cpp): per QSA layer the raw index keys [ctx, 128]
     // and block keys [ctx/ratio, 128] of the ONE sequence; token-sized GEMM/query buffers;
     // selection lists and a scratch paged K/V for qsa_rows_ query rows.
