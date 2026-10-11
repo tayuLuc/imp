@@ -203,7 +203,8 @@ void GraphExecutor::ple_prepare_host_(const int32_t* ids, int n, int n_seq, cons
                                            cudaMemcpyHostToDevice, stream));
         ple_gather(ple_d_ids_, static_cast<uint32_t>(dev_rows), tab->map_base(), ple_d_shard_start_,
                    ple_d_shard_off_, static_cast<int>(tab->shard_count()), tab->total_rows(),
-                   tab->head_dim(), tab->scale(), ple_emb_dev_.as<uint16_t>(), stream);
+                   tab->head_dim(), tab->scale(),
+                   static_cast<uint16_t*>(ple_emb_dev_.data), stream);
         return;
     }
 
