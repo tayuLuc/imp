@@ -434,9 +434,7 @@ fa2_hd256_bkv        = 64
 hd512_prefill        = "auto"
 # Dense hd=128 Bq=128 FA2 at two CTAs per SM (TWOSLOT tile + kernel pinned
 # to 128 registers): FA2 kernel -10% at pp4096 on Qwen3-14B-NVFP4, output
-# bit-identical. hd=64 Bq=128 (gpt-oss, double buffer): 163 -> 128 registers,
-# kernel -13 % at pp4096 on gpt-oss-20b. Default on; false restores the
-# single-CTA instances.
+# bit-identical. Default on; false restores the single-CTA instance.
 fa2_dense_2cta       = true
 # RA2 prefill (compute/ra2/): INT8 QK^T + NVFP4 P x two-term NVFP4 V, Q/K/V
 # quantized per call. hd 64/128/256, causal; declines sliding window, softcap,
@@ -1249,3 +1247,26 @@ mtp_tree_probe       = false
 [calibration]
 enabled              = false
 out_path             = ""
+
+# ---------------------------------------------------------------------------
+# Qwen4Exp (Flash-Next) PLE n-gram table reader. The table is 51 GiB of F8
+# shards and is never fully resident; this picks who faults it in, at load.
+#
+#   mmap   (default) map the shard file once, MADV_RANDOM, MADV_WILLNEED per
+#          row. The page cache owns residency: fast, but its RSS grows toward
+#          the whole table under large folios and is only bounded by kernel
+#          reclaim.
+#   pread  read the selected rows into host staging, O_DIRECT where the
+#          filesystem accepts it, on ple.io_threads workers. Resident set is
+#          the staging buffer, not the table.
+#   uring  the same reads submitted as a bounded io_uring batch. Without
+#          liburing in the build this logs once and serves as pread.
+#
+# All three return identical rows; they differ in residency and in read
+# latency. Benchmark on the target box before switching a serving rig.
+[ple]
+table_backend        = "mmap"
+io_threads           = 0      # 0 = auto (4, capped by online cores)
+coalesce_kib         = 0      # 0 = auto (64)
+queue_depth          = 0      # 0 = auto (64)
+log_stats            = true

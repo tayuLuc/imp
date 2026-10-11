@@ -1,10 +1,10 @@
 #pragma once
 
-// The nine RuntimeConfig sections src/exec reads, lifted from
-// runtime/config.h so the hot layer doesn't depend on the top one; live in
-// namespace imp::cfg to avoid collisions (imp::KVCache is the paged cache).
-// DispatchPolicy is a SNAPSHOT filled after the init resolvers; one writer
-// exists after that point (executor_workspace_buffers.cu on
+// The ten RuntimeConfig sections read outside runtime/ (most of them src/exec),
+// lifted from runtime/config.h so the hot layer doesn't depend on the top one;
+// live in namespace imp::cfg to avoid collisions (imp::KVCache is the paged
+// cache). DispatchPolicy is a SNAPSHOT filled after the init resolvers; one
+// writer exists after that point (executor_workspace_buffers.cu on
 // attention.fmha_prefill_threshold) and every reader is inside src/exec/.
 // A future mutation whose readers live outside exec would silently diverge.
 
@@ -22,15 +22,16 @@
 #include "core/config/speculative.h"
 #include "core/config/ffn.h"
 #include "core/config/diagnostics.h"
+#include "core/config/ple.h"
 
 namespace imp {
 
-// The nine sections now live one per header under core/config/; this file
+// The sections now live one per header under core/config/; this file
 // keeps `#include "core/dispatch_policy.h"` compiling unchanged. A TU that
 // needs one section should include that header directly instead.
 
-// The sections exec/ needs, together: a distinct type rather than a handle
-// on RuntimeConfig, so core/ never depends on runtime/.
+// The sections a non-runtime reader needs, together: a distinct type rather
+// than a handle on RuntimeConfig, so core/ never depends on runtime/.
 struct DispatchPolicy {
     cfg::KVCache kv_cache;
     cfg::Attention attention;
@@ -41,6 +42,7 @@ struct DispatchPolicy {
     cfg::Speculative speculative;
     cfg::FFN ffn;
     cfg::Diagnostics diagnostics;
+    cfg::PLE ple;
 };
 
 }  // namespace imp

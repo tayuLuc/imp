@@ -46,6 +46,10 @@ Keys most often touched, with defaults (`src/runtime/config.h`, `src/core/config
 | `rope.factor` | `1.0` | context-extension factor; raises the detected window to `factor x orig_ctx`, e.g. `4.0` stretches 32k -> 128k |
 | `rope.orig_ctx` | `0` (auto) | native training context the factor applies to |
 | `moe.expert_cache_budget_pct` | `0` (auto) | host-expert cache budget; only relevant when MoE experts don't fit, see [`PERF.md`](PERF.md) |
+| `ple.table_backend` | `mmap` | Qwen4Exp PLE n-gram table reader: `mmap` (page cache owns residency), `pread` (rows into host staging, O_DIRECT where the filesystem allows), `uring` (same reads as a bounded io_uring batch; serves as `pread` without liburing). Set at model load |
+| `ple.io_threads` | `0` (auto) | host threads issuing `pread`/`uring` reads for the streaming table backends |
+| `ple.coalesce_kib` | `0` (auto) | rows within this file-offset window are read as one range (64 KiB) |
+| `ple.queue_depth` | `0` (auto) | io_uring SQEs in flight per gather (64) |
 | `attention.sparse_topk_tokens` | `-1` (auto) | sparse decode token budget; auto = 4096 on qwen3, qwen3moe, qwen35, qwen36moe, nemotron_h_moe, llama, gpt_oss, else 0; `0` = off (#2405) |
 | `attention.sparse_prefill_topk_tokens` | `-1` (auto) | auto = 8192 on qwen35, 16384 on qwen3 and qwen36moe, 24576 on qwen3moe and llama, else 0; `0` = off (#2406, #2529). Sparse prefill: past tokens a continuation chunk attends to (own chunk dense), one page selection per chunk (record: `plans/2026-08-28-sparse-decode-attention.md`) |
 | `attention.sparse_prefill_rows` | `16` | query rows per chunk that score the past pages (max 64) |
