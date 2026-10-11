@@ -6,9 +6,10 @@
 // host suite uses, so a failure here is a real disagreement and not a property of some 47.7 GiB
 // checkpoint we would have to download to reproduce it.
 //
-// What it proves that the host suite cannot: that the kernel reads the mmap through HMM, finds the
-// right shard, and converts identically. What it still does not prove: anything about a cold page
-// cache on the real model, or the speed of an HMM software fault. Those need the real table.
+// What it proves: the kernel returns the same bytes as the host reader eagerly, and the same bytes
+// again when replayed from a captured CUDA graph (twice, so a replay-only divergence would show).
+// That is what lets it sit inside a graph. What it still does not prove: anything about a cold page
+// cache on the real 47.7 GiB checkpoint, or the cost of an HMM software fault. Both need hardware.
 
 #include "compute/ple.h"
 #include "model/ngram_table.h"
@@ -197,5 +198,52 @@ int main() {
         return 1;
     }
     std::printf("PASS device gather is byte-identical to the host reader\n");
+
+    // The point of putting this kernel inside a CUDA graph is that a graph can replay it, so
+    // replay is what has to be tested: capture is not enough, and neither is a second eager
+    // launch. A graph bakes the launch geometry, so a kernel that is correct eagerly can still be
+    // wrong under replay if it depends on anything the capture did not record.
+    //
+    // Stream capture is refused on the legacy default stream, which is why the first pass above
+    // passed nullptr. Capturing therefore needs a stream of its own.
+    cudaStream_t cap = nullptr;
+    CHECK_CUDA(cudaStreamCreate(&cap));
+    CHECK_CUDA(cudaMemsetAsync(d_out, 0xcd, count * head_dim * sizeof(uint16_t), cap));
+    CHECK_CUDA(cudaStreamBeginCapture(cap, cudaStreamCaptureModeThreadLocal));
+    imp::ple_gather(static_cast<const int64_t*>(d_ids), static_cast<uint32_t>(count), table->map_base(),
+                    static_cast<const int64_t*>(d_starts), static_cast<const uint64_t*>(d_offs),
+                    static_cast<int>(rows), table->total_rows(), head_dim, table->scale(),
+                    static_cast<uint16_t*>(d_out), cap);
+    cudaGraph_t graph = nullptr;
+    const cudaError_t end_err = cudaStreamEndCapture(cap, &graph);
+    if (end_err != cudaSuccess || graph == nullptr) {
+        std::fprintf(stderr, "FAIL capture did not produce a graph: %s\n", cudaGetErrorString(end_err));
+        return 2;
+    }
+    cudaGraphExec_t exec = nullptr;
+    CHECK_CUDA(cudaGraphInstantiate(&exec, graph, nullptr, nullptr, 0));
+    std::printf("captured and instantiated a graph\n");
+
+    // Replay twice. The first launch of a graph is allowed to differ from subsequent ones, and a
+    // one-shot check would miss a bug that only shows on the second pass.
+    for (int pass = 0; pass < 2; ++pass) {
+        CHECK_CUDA(cudaMemsetAsync(d_out, 0xcd, count * head_dim * sizeof(uint16_t), cap));
+        CHECK_CUDA(cudaGraphLaunch(exec, cap));
+        CHECK_CUDA(cudaStreamSynchronize(cap));
+        CHECK_CUDA(cudaMemcpy(dev.data(), d_out, dev.size() * sizeof(uint16_t), cudaMemcpyDeviceToHost));
+        size_t bad = 0;
+        for (size_t i = 0; i < count * static_cast<size_t>(head_dim); i++)
+            if (host[i] != dev[i])
+                ++bad;
+        std::printf("replay %d: %zu halves, %zu mismatches\n", pass + 1, count * head_dim, bad);
+        if (bad != 0) {
+            std::fprintf(stderr, "FAIL replay %d differs from the host reader\n", pass + 1);
+            return 1;
+        }
+    }
+    std::printf("PASS the captured graph replays byte-identically to the host reader\n");
+    cudaGraphExecDestroy(exec);
+    cudaGraphDestroy(graph);
+    cudaStreamDestroy(cap);
     return 0;
 }
