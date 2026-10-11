@@ -1,5 +1,7 @@
 #pragma once
 
+#include "core/dispatch_policy.h"  // the config sections the loader and exec/ read (F-10)
+
 #include "core/dispatch_policy.h"  // the nine sections exec/ reads (F-10)
 
 // imp.conf: central runtime configuration, loaded once at startup from a
@@ -431,6 +433,8 @@ struct RuntimeConfig {
     cfg::FFN ffn;
 
     cfg::Diagnostics diagnostics;
+
+    cfg::PLE ple;
 
     // Collects per-input-channel activation magnitudes during a forward
     // pass for imp-quantize's AWQ scale search (not an inference feature: a
