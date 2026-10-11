@@ -1,15 +1,15 @@
 <!--
 layer: L0
 audience: newcomers
-verified: 2026-10-11
-commit: 54921da6
+verified: 2026-09-30
+commit: 0ef52509
 -->
 
 <p align="center">
   <img src="docs/logo.svg" alt="imp" width="500">
 </p>
 
-<p align="center"><b>Your RTX 5090 is faster than your inference engine. imp fixes that.</b><br>
+<p align="center"><b>Run open LLMs on an NVIDIA RTX 5090 at the speed the card can do</b><br>
 one <code>docker run</code> · OpenAI and Anthropic API · built-in chat · Linux or WSL2</p>
 
 <p align="center">
@@ -18,61 +18,62 @@ one <code>docker run</code> · OpenAI and Anthropic API · built-in chat · Linu
   <img src="https://img.shields.io/badge/C++-23-00599C?style=flat&logo=cplusplus" alt="C++23">
 </p>
 
-General-purpose engines run on every GPU, so none of them is built around yours. imp is written for exactly one chip, the RTX 5090 generation (`sm_120a`), and uses what that chip has: native 4-bit (FP4) math, its tensor cores, its memory bandwidth.
+imp is an inference engine written for exactly one chip, the RTX 5090 generation (`sm_120a`). It does not trade speed for portability: it computes on the card's native 4-bit (FP4) number format, where general engines fall back to slower paths.
 
-### Qwen3.8-27B: text and images, on one card
-
-| Same RTX 5090, each engine on its defaults | **imp** | vLLM 0.31.0 | llama.cpp |
-| --- | ---: | ---: | ---: |
-| one user | **91.0-93.7 tokens/s** | 68.9-70.0 tokens/s | 61.8-63.0 tokens/s |
-| 32 users at once (total) | **1963.5-1977.0 tokens/s** | 1354.8-1449.4 tokens/s | 162.0-166.8 tokens/s |
-
-[PROV: commit=54921da6 date=2026-10-11 hw=RTX5090 model=Qwen3.8-27B quant=NVFP4 (imp, vLLM: Qwen3.8-27B-NVFP4-vllm) / Q4_K_M (llama.cpp: ggml-org Qwen3.8-27B-Q4_K_M.gguf)
-       cuda=13.4.2 path=server-api cmd=`tools/analysis/engine3_conc.sh` n=2 trials x 3 waves, range of the trial medians
-       note=300-token greedy answers, ignore_eos; llama.cpp image server-cuda sha256 9d835c2f]
-
-imp and vLLM read the same NVFP4 checkpoint, llama.cpp the Q4_K_M GGUF. On that GGUF imp is behind llama.cpp today (58.0-60.7 and 107.0-107.4 tokens/s, [#2688](https://github.com/kekzl/imp/issues/2688)): for Qwen3.8 on imp, take the NVFP4 checkpoint.
-
-### Qwen3.8-Flash-Next: four times bigger than the card
-
-The 123.6 GiB checkpoint does not fit in 32 GB. imp keeps its 56.25 GiB of experts in host RAM and caches the busiest ones on the card: **87.89-98.57 tokens/s** on one RTX 5090 with ~62 GiB of free RAM, reading a 512-token prompt at 1094.74-1096.10 tokens/s ([quickstart](#quickstart-qwen38-flash-next)).
-
-[PROV: commit=54921da6 date=2026-10-11 hw=RTX5090 model=Qwen3.8-Flash-Next-NVFP4 quant=NVFP4 cuda=13.4.2
-       path=host-resident-experts cmd=`imp-cli --bench --bench-pp 512 --bench-reps 3 --max-tokens 128
-       --bench-prompt-file novel_prose_2026.txt` n=2 processes note=real-text prompt, imp defaults; 56.25 GiB =
-       load log `NVFP4 experts (56.25 GiB) do not fit`, main 62431977]
-
-**tokens/s** = how fast the answer appears (a token is about ¾ of a word). Six more models against llama.cpp on the same GGUF file, and every other comparison: [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md).
-
-## Why imp
-
-- **Fast where you feel it.** Answers stream faster, many users share the card (table above), long prompts are read with FP4 attention, and a repeated prompt prefix is read once.
-- **Models bigger than the card.** Mixture-of-experts models keep their experts in host RAM and cache the busiest on the card (Flash-Next above).
-- **Drop-in for your tools.** OpenAI and Anthropic APIs, tool calling, JSON output, streaming, thinking models, a built-in chat in the browser. Point your coding agent at it and go.
-- **No conversion step.** Load the GGUF you already have, or an NVFP4 SafeTensors checkpoint straight from Hugging Face.
-- **One container.** No CUDA toolkit, no Python environment on your machine: Docker plus the NVIDIA driver.
 - **Free and open source** (MIT).
+- **One card only:** RTX 5090 (32 GB, the tested one), 5080, 5070 Ti, RTX PRO 6000. No other GPU, no CPU mode, no multi-GPU. For breadth use [llama.cpp](https://github.com/ggerganov/llama.cpp), for many GPUs [vLLM](https://github.com/vllm-project/vllm): [who fits where](docs/PERF.md#competitive-standing).
+- **One author, no support rotation.** Issues are welcome, answers are not guaranteed.
 
-## Is it for you?
+> **Jump to:** [How fast?](#how-fast-is-it) · [Which model?](#which-model-should-i-pick) · [Install](#install) · [Flash-Next](#quickstart-qwen38-flash-next) · [Using it](#using-it) · [Problems?](#something-went-wrong) · [How it works](#how-does-it-work) · [All the docs](#go-deeper)
 
-| You have | imp |
-| --- | --- |
-| RTX 5090 (32 GB, the tested one), 5080, 5070 Ti, RTX PRO 6000 | yes |
-| any other GPU, CPU only, several GPUs | no: use [llama.cpp](https://github.com/ggerganov/llama.cpp) for breadth, [vLLM](https://github.com/vllm-project/vllm) for many GPUs ([who fits where](docs/PERF.md#competitive-standing)) |
+## How fast is it?
 
-imp has one author: issues are welcome, answers are not guaranteed.
+Same RTX 5090, same model file, both engines on their defaults. **tokens/s** = how fast the answer appears (a token is about ¾ of a word).
 
-> **Jump to:** [Which model?](#which-model-should-i-pick) · [Install](#install) · [Flash-Next](#quickstart-qwen38-flash-next) · [Using it](#using-it) · [Problems?](#something-went-wrong) · [How it works](#how-does-it-work) · [All the docs](#go-deeper)
+| Model | imp | llama.cpp | imp ahead by |
+| --- | ---: | ---: | ---: |
+| **Qwen3-8B** (Q8_0) | 385.4 tokens/s | 160.1 tokens/s | +141% |
+| **Qwen3.6-35B-A3B** (Q4_K_M) | 287.9 tokens/s | 235.8 tokens/s | +22% |
+| **gpt-oss-20b** (MXFP4) | 382.7 tokens/s | 335.9 tokens/s | +14% |
+| **Gemma-4-26B-A4B** (Q4_K_M) | 245.0 tokens/s | 214.4 tokens/s | +14% |
+
+[PROV: commit=83cb5178 date=2026-08-30 hw=RTX5090 model=six-model-sweep quant=per-row cuda=13.3
+       path=gguf cmd=`make bench-competitive` n=6x2 note=imp defaults vs llama.cpp defaults, full
+       offload, flash attention on; spec-off measured for Qwen3-8B only
+       (`--set speculative.ngram=false`)]
+
+The smallest lead in that sweep was +3% (Qwen3-30B-A3B). All rows, and imp vs vLLM with many users at once: [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md).
+
+**Bigger than the card: Qwen3.8-Flash-Next** (NVFP4). Its 56.25 GiB of experts stay in host RAM, the card caches the busiest ones: **65.31 tokens/s**. Full speed needs the experts plus 6 GiB free in host RAM (~62 GiB); with less, imp warns and serves from a slower path.
+
+[PROV: commit=80c3a110 date=2026-09-30 hw=RTX5090 model=Qwen3.8-Flash-Next-NVFP4 quant=NVFP4 cuda=13.4
+       path=host-resident-experts cmd=`scripts/accept_2272.sh` of #2326 n=4 prompts x 3 runs note=128 tokens greedy, mtp_k=0;
+       56.25 GiB = load log `NVFP4 experts (56.25 GiB) do not fit`, main 62431977; 6 GiB = kHeadroom in src/model/weight_upload.cpp]
+
+**What CI defends:** every push measures one pinned model (Qwen3-8B Q8_0, speculation off, hence below the row above) and fails on an 8% move (decode on the test host moves several percent between sessions with nothing changed: [`docs/PERF.md`](docs/PERF.md)). **decode** = writing the answer, **prefill** = reading your prompt.
+
+<!-- PERF:BEGIN -->
+| metric | value | threshold |
+|---|---|---|
+| decode tg128 | **282.97 tok/s** | 8 % |
+| prefill pp128 | 6132.05 tok/s | 8 % |
+| prefill pp512 | **14053.01 tok/s** | 8 % |
+| prefill pp4096 | 16197.82 tok/s | 8 % |
+| peak VRAM (own) | 20264 MiB | 10 % |
+
+[PROV: commit=702a9cd3 date=2026-09-28 hw=RTX5090 model=Qwen3-8B-Q8_0 quant=Q8_0
+       cuda=13.4 path=gguf-dp4a cmd=`make verify-fast` n=5x5]
+<!-- PERF:END -->
 
 ## Which model should I pick?
 
 | You want | Take | Why |
 | --- | --- | --- |
 | **Not sure** | **Qwen3.8-27B** NVFP4 (the [install](#install) example) | reads text and images, fits one 5090 with room for a long context |
-| the fastest replies | **Qwen3-8B** Q8_0 | the fastest of the [GGUF sweep](docs/BENCHMARKS.md) |
+| the fastest replies | **Qwen3-8B** Q8_0 | the fastest row above |
 | more knowledge, still fast | **Qwen3.6-35B-A3B** | mixture of experts: large, but only a small part works per token |
-| another model family | **gpt-oss-20b** or **Gemma-4-26B-A4B** | both in the [GGUF sweep](docs/BENCHMARKS.md) |
-| the biggest model, and ~62 GiB of free RAM | **Qwen3.8-Flash-Next** NVFP4 | too big for 32 GB: the experts live in host RAM ([above](#qwen38-flash-next-four-times-bigger-than-the-card)) |
+| another model family | **gpt-oss-20b** or **Gemma-4-26B-A4B** | both in the table above |
+| the biggest model, and ~62 GiB of free RAM | **Qwen3.8-Flash-Next** NVFP4 | too big for 32 GB: the experts live in host RAM ([above](#how-fast-is-it)) |
 
 **Will it fit?** Weights plus the KV cache (the model's memory of the conversation) must fit in the card's 32 GB. imp sizes the context to what is left after the weights, and refuses at load a model whose experts do not fit instead of running it wrong. Every family that loads, with its size: [`docs/MODELS.md`](docs/MODELS.md).
 
@@ -98,7 +99,7 @@ The weights take 18.3 GiB on the card and answer at **~102 tokens/s**, leaving ~
 **Shortcut:** `--model hf://<org>/<repo>[:<file>.gguf]` downloads a repo inside the container into `/models` (resumable, checksummed, `HF_TOKEN` for gated repos): [`docs/CONFIG.md`](docs/CONFIG.md#fetching-from-hugging-face). Full walkthrough: [`docs/QUICKSTART.md`](docs/QUICKSTART.md).
 
 ## Quickstart: Qwen3.8-Flash-Next
-**You need:** RTX 5090, ~62 GiB free host RAM (the 56.25 GiB of experts plus free headroom; less RAM serves from a slower path), 123.6 GiB disk for [`nvidia/Qwen3.8-Flash-Next-NVFP4`](https://huggingface.co/nvidia/Qwen3.8-Flash-Next-NVFP4).
+**You need:** RTX 5090, ~62 GiB free host RAM ([why](#how-fast-is-it)), 123.6 GiB disk for [`nvidia/Qwen3.8-Flash-Next-NVFP4`](https://huggingface.co/nvidia/Qwen3.8-Flash-Next-NVFP4).
 ```bash
 docker pull ghcr.io/kekzl/imp:latest
 IMP_IMAGE=ghcr.io/kekzl/imp:latest STAGE_DIR=~/models/Qwen3.8-Flash-Next-NVFP4 scripts/stage-model.sh nvidia/Qwen3.8-Flash-Next-NVFP4 ~/models/Qwen3.8-Flash-Next-NVFP4

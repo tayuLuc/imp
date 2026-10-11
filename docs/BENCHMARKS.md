@@ -1,8 +1,8 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-10-11
-commit: 54921da6
+verified: 2026-10-09
+commit: 7e720263
 -->
 
 # Benchmarks
@@ -21,7 +21,7 @@ before timing, `CUBLAS_WORKSPACE_CONFIG=:4096:8`. Decode (tg) is the reliable A/
 (pp) varies up to 2.6x across container restarts (cuBLAS autotuning) and is not tabulated for
 comparisons.
 
-**Toolchain (current: `v0.51.0`):** C++23, Ubuntu 26.04 / GCC 15.2, CUDA 13.4.2.
+**Toolchain (current: `v0.50.0`):** C++23, Ubuntu 26.04 / GCC 15.2, CUDA 13.4.2.
 
 The CI-gated canonical baseline lives in [`tests/perf_baseline.json`](../tests/perf_baseline.json)
 (8% decode / 8% prefill regression gate, 10% peak-VRAM ceiling); pinned values, thresholds and
@@ -35,20 +35,20 @@ against llama.cpp defaults, full offload, flash attention on.
 
 | Model (shared quant) | imp default | imp spec-off | llama.cpp | imp lead |
 |---|---:|---:|---:|---:|
-| Qwen3-8B Q8_0 | **397.51** | 278.42 | 152.74 | +160% (+82% spec-off) |
-| Qwen3-14B Q6_K | **167.43** | 168.65 | 112.84 | +48% (+49% spec-off) |
-| Qwen3.6-35B-A3B UD-Q4_K_M | **317.41** | 319.01 | 220.09 | +44% (+45% spec-off) |
-| Gemma-4-26B-A4B UD-Q4_K_M | **262.71** | 262.32 | 212.49 | +24% (+23% spec-off) |
-| gpt-oss-20b MXFP4 | **391.52** | 397.67 | 317.11 | +23% (+25% spec-off) |
-| Qwen3-30B-A3B Q4_K_M (non-hero) | 357.23 | 359.23 | 303.53 | +18% (+18% spec-off) |
+| Qwen3-8B Q8_0 | **385.4** | 284.6 | 160.1 | +141% (+78% spec-off) |
+| Qwen3-14B Q6_K | **162.5** | | 114.8 | +42% |
+| Qwen3.6-35B-A3B UD-Q4_K_M | **287.9** | | 235.8 | +22% |
+| gpt-oss-20b MXFP4 | **382.7** | | 335.9 | +14% |
+| Gemma-4-26B-A4B UD-Q4_K_M | **245.0** | | 214.4 | +14% |
+| Qwen3-30B-A3B Q4_K_M (non-hero) | 305.5 | | 295.7 | +3% |
 
-[PROV: commit=54921da6 date=2026-10-11 hw=RTX5090 model=six-model-sweep quant=per-row cuda=13.4.2
-       path=gguf cmd=`make bench-competitive` (v0.51.0 release gate, 11 idle service containers up)
-       note=imp defaults vs llama.cpp defaults, full offload, flash attention on; spec-off =
-       `--set speculative.ngram=false`. Previous sweep 83cb5178 (2026-08-30): Qwen3-8B 385.4 vs 160.1]
+[PROV: commit=83cb5178 date=2026-08-30 hw=RTX5090 model=six-model-sweep quant=per-row cuda=13.3
+       path=gguf cmd=`make bench-competitive` n=6x2 note=imp defaults vs llama.cpp defaults, full
+       offload, flash attention on; spec-off measured for Qwen3-8B only
+       (`--set speculative.ngram=false`)]
 
 The spec-off column exists because `imp-cli --bench` builds a strictly-increasing synthetic
-prompt (`tools/imp-cli/mode_bench.cpp:34 tokens[i] = i % vocab_size`) that the n-gram drafter's own generation can loop
+prompt (`tools/imp-cli/mode_bench.cpp:31 tokens[i] = i % vocab_size`) that the n-gram drafter's own generation can loop
 into: a decode A/B that leaves speculation on can measure whether a checkpoint happens to loop,
 not only the verify path. Reproduce with `make bench-competitive` (competitor image pinned by
 digest in [`scripts/bench_competitive.sh`](../scripts/bench_competitive.sh), not by tag); two
@@ -130,26 +130,24 @@ rows, ratios carry that cross-day caveat).
 imp also wins TTFT/pp512 outright (2.1-3.4x, vLLM has a flat-cost small-M regime). Decode
 (tg256 @ctx2048): 14B 159, 30B-A3B ~317.
 
-## Qwen3.8-27B, three engines
+## Qwen3.8-27B, the quickstart model
 
-Fresh server per arm, each engine on its defaults (imp `--max-concurrent N --set runtime.max_batch_size=N`,
-vLLM `--max-num-seqs N --max-model-len 16384`, llama.cpp `-ngl 999 -fa on -np N -c N*4096`), 300-token
-greedy answers with `ignore_eos`, aggregate = completion tokens / wall, values = the two trial medians.
+The model the [README](../README.md) and [`QUICKSTART.md`](QUICKSTART.md) walk a first-time
+reader through: `imp-quantize` output from the FP8 release (`Qwen/Qwen3.8-27B-FP8`, 28.75 GiB
+in, 18.80 GiB out), which `scripts/stage-model.sh` produces.
 
-[PROV: commit=54921da6 date=2026-10-11 hw=RTX5090 model=Qwen3.8-27B quant=per-row cuda=13.4.2
-       path=server-api cmd=`tools/analysis/engine3_conc.sh` n=2 trials x 3 waves note=vllm/vllm-openai:v0.31.0
-       sha256 c1c9f6fd, ghcr.io/ggml-org/llama.cpp:server-cuda sha256 9d835c2f, GGUF ggml-org Q4_K_M sha256 c600de03]
+[PROV: commit=52efa361 date=2026-08-16 hw=RTX5090 model=Qwen3.8-27B quant=NVFP4-FP8-export
+       cuda=13.3 path=nvfp4-decode cmd=`imp-cli --model <dir> --bench --bench-pp <16|512>
+       --bench-reps 10 --max-tokens 128` n=3-processes]
 
-| engine | checkpoint | 1 stream tok/s | 32 streams tok/s |
-|---|---|---:|---:|
-| imp | Qwen3.8-27B-NVFP4-vllm | **91.0 / 93.7** | **1977.0 / 1963.5** |
-| vLLM 0.31.0 | Qwen3.8-27B-NVFP4-vllm | 70.0 / 68.9 | 1449.4 / 1354.8 |
-| llama.cpp | Qwen3.8-27B-Q4_K_M.gguf | 63.0 / 61.8 | 166.8 / 162.0 |
-| imp | Qwen3.8-27B-Q4_K_M.gguf | 58.0 / 60.7 | 107.4 / 107.0 |
+| metric | tok/s | spread across processes |
+|---|---:|---|
+| decode tg128 | **87.36** | 87.34 / 87.36 / 87.39, 0.06% |
+| prefill pp512 | **7565.65** | 7503 / 7566 / 7577, 0.98% |
 
-imp on the GGUF holds 7 recurrent slots at 19822.3 MiB of weights and a batch-7 step costs ~4x a batch-1
-step ([#2688](https://github.com/kekzl/imp/issues/2688)). Unsloth's `UD-Q4_K_M` does not load: 4 IQ3_S
-tensors ([#2687](https://github.com/kekzl/imp/issues/2687)).
+Weights land at 17.9 GiB resident, ~7.7 GiB left for KV on a 32 GB card. Bounded by weight
+bandwidth, not the LM head (2.4 GiB of the 17.9, served from the NVFP4 decode cache, a trade
+measured at +10.4% decode for +0.99% perplexity, see [`quantization.md`](quantization.md)).
 
 ## imp vs vLLM at concurrency
 

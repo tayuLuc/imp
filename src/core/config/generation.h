@@ -1,8 +1,8 @@
 #pragma once
 
-// One of nine RuntimeConfig sections split from core/dispatch_policy.h:
+// One of ten RuntimeConfig sections split from core/dispatch_policy.h:
 // isolates a TU that touches only this section from the other eight's churn.
-// Pure move, byte-identical; dispatch_policy.h still includes all nine.
+// Pure move, byte-identical; dispatch_policy.h still includes all ten.
 
 #include <cstdint>
 #include <string>
