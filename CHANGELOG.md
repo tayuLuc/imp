@@ -5,6 +5,11 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Added
+- `ple.table_backend` (`mmap` default, `pread`, `uring`): Qwen4Exp PLE n-gram table reader. The 47.7 GiB
+  FP8 table is never fully resident; `pread` reads the selected rows into a 4 KiB-aligned host staging
+  buffer (O_DIRECT widened to the alignment, on `ple.io_threads` workers) and `uring` submits those reads
+  as a bounded io_uring batch, so resident set is the staging buffer instead of the page cache. All three
+  backends return identical rows; `uring` serves as `pread` when the build has no liburing.
 - `imp-quantize --calib` supports `deepseek_v2` (MLA + MoE): q_proj + kv_a_proj fold into input_layernorm, new opt-in group K folds kv_b_proj into kv_a_layernorm. DeepSeek-V2-Lite NVFP4 PPL (ppl_corpus_45k): RTN 9.6015, `--calib` 9.5250, `ABCDK` 9.5092, BF16 9.0616 (#2654).
 - `imp_set_forced_decode` / `imp_forced_decode_count` (C API) and `imp-cli --bench-teacher-force`: teacher-forced decode, every tg input comes from `--bench-prompt-file` (the text after the prompt), so builds decode the same token sequence; the forced request decodes per step (no pipeline, graph loop or speculation).
 - `imp-cli --bench-prompt-file <path>`: the `--bench` prompt from a text file, repeated or cut to `--bench-pp`, `speculative.ngram` pinned off; Flash-Next-NVFP4 expert cache hit rate over 3 processes 82.7-84.7 % against 88.6-98.7 % on the synthetic prompt.
